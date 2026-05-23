@@ -1,100 +1,80 @@
-const express = require('express');
-const cors = require('cors');
-const axios = require('axios');
-const { MercadoPagoConfig, Payment } = require('mercadopago');
+import express from 'express';
+import cors from 'cors';
+import { MercadoPagoConfig, Payment } from 'mercadopago';
 
 const app = express();
-
-app.use(cors());
 app.use(express.json());
+app.use(cors());
 
-// CONFIGURAÇÃO DO MERCADO PAGO
-// SUBSTITUA as letras abaixo pelo seu token real gerado no painel do MP!
-const MP_ACCESS_TOKEN = 'SEU_ACCESS_TOKEN_AQUI'; 
-
-const client = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
+// CONFIGURAÇÃO SEGURO DO CLIENT DO MERCADO PAGO V2
+// Certifique-se de que a variável de ambiente MERCADO_PAGO_TOKEN está configurada no painel do Render
+const client = new MercadoPagoConfig({ 
+    accessToken: process.env.MERCADO_PAGO_TOKEN || 'APP_USR-458222214312-TESTE-EXEMPLO' 
+});
 const payment = new Payment(client);
 
-const FIREBASE_DB_URL = 'https://azar-c7f24-default-rtdb.firebaseio.com';
-
 app.get('/', (req, res) => {
-    res.send('Servidor do Bingo com Mercado Pago Ativo!');
+    res.send('Servidor do Bingo Royale rodando perfeitamente!');
 });
 
-// 1. ROTA QUE CRIA O PIX COPIA E COLA
+// ROTA ULTRA-BLINDADA PARA GERAÇÃO DO PIX
 app.post('/criar-pix', async (req, res) => {
-    console.log('--- SOLICITAÇÃO DE GERAÇÃO DE PIX ---');
+    console.log('--- NOVA TENTATIVA DE GERAÇÃO DE PIX ---');
     const { uid, valor, email } = req.body;
 
     if (!uid || !valor) {
-        return res.status(400).json({ error: 'Dados insuficientes.' });
+        console.error('❌ Falha: uid ou valor ausentes na requisição.');
+        return res.status(400).json({ error: 'Dados insuficientes enviados pelo front-end.' });
     }
 
     try {
-        const response = await payment.create({
+        const dadosPagamento = {
             body: {
                 transaction_amount: Number(valor),
-                description: `Recarga Bingo - ID ${uid}`,
+                description: `Recarga Bingo - Jogador ${uid}`,
                 payment_method_id: 'pix',
                 payer: {
-                    email: email || 'usuario@bingo.com'
+                    email: email || 'usuario.bingo@gmail.com'
                 },
                 metadata: {
                     user_id: uid
                 }
             }
-        });
+        };
+
+        console.log(`Enviando dados ao Mercado Pago para o valor de R$ ${valor}...`);
+        const response = await payment.create(dadosPagamento);
         
+        // Coleta os dados independente do nível de aninhamento retornado pelo SDK
         const copiaCola = response.point_of_interaction?.transaction_data?.qr_code;
+        const qrCodeBase64 = response.point_of_interaction?.transaction_data?.qr_code_base64;
         
         if (!copiaCola) {
-            return res.status(500).json({ error: 'Formato de Pix invalido' });
+            console.error('❌ Resposta inválida do Mercado Pago (Chave Copia e Cola ausente):', JSON.stringify(response));
+            return res.status(500).json({ error: 'O Mercado Pago respondeu, mas não gerou o código Pix.' });
         }
 
-        console.log(`✅ Pix criado para o jogador: ${uid}`);
-        return res.json({ copiaCola });
+        console.log(`✅ Pix gerado com sucesso para o ID: ${uid}`);
+        return res.json({ 
+            copiaCola: copiaCola,
+            qrCodeBase64: qrCodeBase64
+        });
 
     } catch (error) {
-        console.error('❌ Erro no Mercado Pago:', error.message);
-        return res.status(500).json({ error: 'Erro ao gerar Pix' });
+        // ESSA SEÇÃO FOI ATUALIZADA PARA ENVIAR O ERRO REAL PARA A UI DO JOGO
+        console.error('❌ ERRO DETALHADO NO MERCADO PAGO:', error);
+        
+        // Extrai a mensagem de erro interna do Mercado Pago, se houver
+        const mensagemErroInterno = error.message || (error.cause && error.cause[0]?.description) || 'Erro interno na API do MP';
+        
+        return res.status(500).json({ 
+            error: 'Erro ao gerar Pix', 
+            detalhes: mensagemErroInterno 
+        });
     }
-});
-
-// 2. WEBHOOK (AVISA QUANDO O PIX FOI PAGO)
-app.post('/webhook', async (req, res) => {
-    console.log('--- NOTIFICAÇÃO DE PAGAMENTO RECEBIDA ---');
-    
-    const idPagamento = req.query['data.id'] || (req.body.data && req.body.data.id);
-    
-    if (idPagamento) {
-        try {
-            const pagInfo = await payment.get({ id: idPagamento });
-            
-            if (pagInfo && pagInfo.status === 'approved') {
-                const valorReal = pagInfo.transaction_amount;
-                const uidJogador = pagInfo.metadata?.user_id;
-
-                console.log(`💰 APROVADO! Jogador: [${uidJogador}] - Valor: R$ ${valorReal}`);
-
-                if (uidJogador) {
-                    const urlUsuario = `${FIREBASE_DB_URL}/users/${uidJogador}.json`;
-                    const userRes = await axios.get(urlUsuario);
-                    const userData = userRes.data;
-
-                    const saldoAtual = userData && userData.creditos ? userData.creditos : 0;
-                    const novoSaldo = Number((saldoAtual + valorReal).toFixed(2));
-
-                    await axios.patch(urlUsuario, { creditos: novoSaldo });
-                    console.log(`✅ Saldo atualizado para R$ ${novoSaldo}`);
-                }
-            }
-        } catch (error) {
-            console.error('❌ Erro ao processar o webhook:', error.message);
-        }
-    }
-
-    return res.status(200).send('OK');
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`🚀 Servidor integrado rodando com sucesso na porta ${PORT}`);
+});
