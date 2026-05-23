@@ -9,6 +9,11 @@ app.use(express.json());
 const LIVEPIX_SECRET = '/33Gl0UQfX1EfGUXflpS8Cg9knJXrQDUjSNf1WiVJHHO9';
 const FIREBASE_DB_URL = 'https://azar-c7f24-default-rtdb.firebaseio.com/';
 
+// Rota principal para o Auto-Ping não dar erro 404
+app.get('/', (req, res) => {
+    res.send('Servidor do Bingo Ativo e Acordado!');
+});
+
 app.post('/webhook', async (req, res) => {
     const signature = req.headers['x-livepix-signature'];
     const payload = JSON.stringify(req.body);
@@ -62,6 +67,13 @@ app.post('/webhook', async (req, res) => {
 
     return res.status(200).send('OK');
 });
+
+// FUNÇÃO SISTEMA ANTI-SONO: Faz o servidor se auto-chamar a cada 5 minutos para nunca dormir
+setInterval(() => {
+    axios.get(`https://bingo-webhook-livepix.onrender.com/`)
+        .then(() => console.log('Auto-ping realizado: Mantendo o servidor acordado!'))
+        .catch((err) => console.log('Aviso de ping:', err.message));
+}, 300000); // 300000 milissegundos = 5 minutos
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
