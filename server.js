@@ -5,82 +5,186 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// Suas credenciais reais configuradas
-const LIVEPIX_SECRET = '/33Gl0UQfX1EfGUXflpS8Cg9knJXrQDUjSNf1WiVJHHO9';
+/*
+========================================
+MERCADO PAGO CONFIG
+========================================
+*/
+
+// ACCESS TOKEN DO MERCADO PAGO
+const MP_ACCESS_TOKEN = 'APP_USR-4600187372479747-052312-671609e2fc63fac76626413c52cde70-1258641529';
+
+// WEBHOOK SECRET
+const MP_WEBHOOK_SECRET = 'MPm7a3arEI63ROyfq1NnmTUcDFo7LEGT';
+
+// FIREBASE
 const FIREBASE_DB_URL = 'https://azar-c7f24-default-rtdb.firebaseio.com';
 
 app.get('/', (req, res) => {
-    res.send('Servidor do Bingo Ativo e Acordado!');
+    res.send('Servidor Mercado Pago ativo!');
 });
 
+/*
+========================================
+WEBHOOK MERCADO PAGO
+========================================
+*/
 app.post('/webhook', async (req, res) => {
-    console.log('--- NOVA NOTIFICAÇÃO DE PIX RECEBIDA ---');
-    
-    const signature = req.headers['x-livepix-signature'];
-    const payload = JSON.stringify(req.body);
 
-    const expectedSignature = crypto
-        .createHmac('sha256', LIVEPIX_SECRET)
-        .update(payload)
-        .digest('hex');
+    console.log('--- NOVA NOTIFICAÇÃO MP ---');
 
-    // SE A ASSINATURA FALHAR, O SERVIDOR VAI AVISAR MAS NÃO VAI BLOQUEAR O PIX!
-    if (signature !== expectedSignature) {
-        console.log('⚠️ AVISO: Assinatura não bateu, mas vamos processar assim mesmo para testar!');
-    }
+    try {
 
-    const data = req.body;
-    console.log('Dados do Pix:', JSON.stringify(data));
+        const paymentId = req.body?.data?.id;
 
-    if (data && data.status === 'APPROVED') {
-        const valorReal = (data.amount ?? 0) / 100;
-        const uidJogador = (data.message ?? '').trim();
+        if (!paymentId) {
+            console.log('Pagamento sem ID');
+            return res.sendStatus(200);
+        }
 
-        console.log(`Processando: Jogador [${uidJogador}] - Valor: R$ ${valorReal}`);
+        console.log('Payment ID:', paymentId);
 
-        if (uidJogador) {
+        /*
+        ========================================
+        BUSCA PAGAMENTO REAL NO MP
+        ========================================
+        */
+        const paymentResponse = await axios.get(
+            `https://api.mercadopago.com/v1/payments/${paymentId}`,
+            {
+                headers: {
+                    Authorization: `Bearer ${MP_ACCESS_TOKEN}`
+                }
+            }
+        );
+
+        const payment = paymentResponse.data;
+
+        console.log('Dados pagamento:', payment);
+
+        /*
+        ========================================
+        VERIFICA SE FOI APROVADO
+        ========================================
+        */
+        if (payment.status === 'approved') {
+
+            const valorReal = Number(payment.transaction_amount || 0);
+
+            // UID do jogador
+            const uidJogador = (payment.external_reference || '').trim();
+
+            console.log(`Jogador: ${uidJogador}`);
+            console.log(`Valor: R$ ${valorReal}`);
+
+            if (!uidJogador) {
+                console.log('UID não encontrado');
+                return res.sendStatus(200);
+            }
+
+            /*
+            ========================================
+            FIREBASE
+            ========================================
+            */
             try {
+
                 const urlUsuario = `${FIREBASE_DB_URL}/users/${uidJogador}.json`;
-                
-                // 1. Busca o usuário
+
+                // busca usuário
                 const userRes = await axios.get(urlUsuario);
                 const userData = userRes.data;
 
-                // Define o saldo atual (se o usuário for novo e não existir, começa com 0)
-                const saldoAtual = userData && userData.creditos ? userData.creditos : 0;
-                const novoSaldo = Number((saldoAtual + valorReal).toFixed(2));
+                const saldoAtual =
+                    userData && userData.creditos
+                        ? userData.creditos
+                        : 0;
 
-                // 2. Grava o novo saldo no Firebase
-                await axios.patch(urlUsuario, { creditos: novoSaldo });
-                console.log(`✅ SUCESSO ABSOLUTO: Saldo atualizado para R$ ${novoSaldo}`);
+                const novoSaldo = Number(
+                    (saldoAtual + valorReal).toFixed(2)
+                );
 
-                // 3. Atualiza o acumulado geral
+                // atualiza saldo
+                await axios.patch(urlUsuario, {
+                    creditos: novoSaldo
+                });
+
+                console.log(`✅ Saldo atualizado: R$ ${novoSaldo}`);
+
+                /*
+                ========================================
+                ACUMULADO
+                ========================================
+                */
                 try {
-                    const autoRes = await axios.get(`${FIREBASE_DB_URL}/jogo/automacao/acumulado.json`);
+
+                    const autoRes = await axios.get(
+                        `${FIREBASE_DB_URL}/jogo/automacao/acumulado.json`
+                    );
+
                     const acumuladoAtual = autoRes.data ?? 0;
-                    const novoAcumulado = Number((acumuladoAtual + valorReal).toFixed(2));
-                    await axios.patch(`${FIREBASE_DB_URL}/jogo/automacao.json`, { acumulado: novoAcumulado });
+
+                    const novoAcumulado = Number(
+                        (acumuladoAtual + valorReal).toFixed(2)
+                    );
+
+                    await axios.patch(
+                        `${FIREBASE_DB_URL}/jogo/automacao.json`,
+                        {
+                            acumulado: novoAcumulado
+                        }
+                    );
+
                 } catch (e) {
-                    console.log('Aviso: Pasta de automação ignorada no teste.');
+                    console.log('Erro acumulado:', e.message);
                 }
 
             } catch (error) {
-                console.error('❌ ERRO ao salvar no Firebase:', error.message);
+                console.error(
+                    'Erro Firebase:',
+                    error.message
+                );
             }
-        } else {
-            console.log('❌ ERRO: O Pix chegou sem nenhum ID de jogador na mensagem.');
         }
-    }
 
-    return res.status(200).send('OK');
+        return res.sendStatus(200);
+
+    } catch (err) {
+
+        console.error(
+            'Erro webhook:',
+            err.response?.data || err.message
+        );
+
+        return res.sendStatus(500);
+    }
 });
 
-// FUNÇÃO ANTI-SONO
+/*
+========================================
+ANTI SONO
+========================================
+*/
 setInterval(() => {
-    axios.get(`https://bingo-webhook-livepix.onrender.com/`)
-        .then(() => console.log('Auto-ping: Servidor acordado.'))
-        .catch((err) => console.log('Erro ping:', err.message));
+
+    axios
+        .get('https://bingo-webhook-livepix.onrender.com/')
+        .then(() =>
+            console.log('Servidor acordado')
+        )
+        .catch((err) =>
+            console.log('Erro ping:', err.message)
+        );
+
 }, 300000);
 
+/*
+========================================
+START
+========================================
+*/
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+
+app.listen(PORT, () => {
+    console.log(`Servidor rodando na porta ${PORT}`);
+});
