@@ -1,190 +1,105 @@
 const express = require('express');
-const crypto = require('crypto');
+const cors = require('cors');
 const axios = require('axios');
+const { MercadoPagoConfig, Payment } = require('mercadopago');
 
 const app = express();
+
+// Ativa o CORS para permitir que o GitHub Pages converse com o Render sem bloqueios
+app.use(cors());
 app.use(express.json());
 
-/*
-========================================
-MERCADO PAGO CONFIG
-========================================
-*/
+// CONFIGURAÇÃO DO MERCADO PAGO
+// Cole o seu Access Token de Produção dentro das aspas abaixo
+const MP_ACCESS_TOKEN = 'SEU_ACCESS_TOKEN_AQUI'; 
+const client = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
+const payment = new Payment(client);
 
-// ACCESS TOKEN DO MERCADO PAGO
-const MP_ACCESS_TOKEN = 'APP_USR-4600187372479747-052312-671609e2fc63fac76626413c52cde70-1258641529';
-
-// WEBHOOK SECRET
-const MP_WEBHOOK_SECRET = 'MPm7a3arEI63ROyfq1NnmTUcDFo7LEGT';
-
-// FIREBASE
+// URL do seu banco de dados Firebase
 const FIREBASE_DB_URL = 'https://azar-c7f24-default-rtdb.firebaseio.com';
 
 app.get('/', (req, res) => {
-    res.send('Servidor Mercado Pago ativo!');
+    res.send('Servidor do Bingo com Mercado Pago Ativo!');
 });
 
-/*
-========================================
-WEBHOOK MERCADO PAGO
-========================================
-*/
-app.post('/webhook', async (req, res) => {
+// 1. ROTA QUE CRIA O PIX COPIA E COLA
+app.post('/criar-pix', async (req, res) => {
+    console.log('--- SOLICITAÇÃO DE GERAÇÃO DE PIX ---');
+    const { uid, valor, email } = req.body;
 
-    console.log('--- NOVA NOTIFICAÇÃO MP ---');
+    if (!uid || !valor) {
+        return res.status(400).json({ error: 'Dados insuficientes.' });
+    }
 
     try {
-
-        const paymentId = req.body?.data?.id;
-
-        if (!paymentId) {
-            console.log('Pagamento sem ID');
-            return res.sendStatus(200);
-        }
-
-        console.log('Payment ID:', paymentId);
-
-        /*
-        ========================================
-        BUSCA PAGAMENTO REAL NO MP
-        ========================================
-        */
-        const paymentResponse = await axios.get(
-            `https://api.mercadopago.com/v1/payments/${paymentId}`,
-            {
-                headers: {
-                    Authorization: `Bearer ${MP_ACCESS_TOKEN}`
-                }
+        const body = {
+            transaction_amount: Number(valor),
+            description: `Recarga Bingo - ID ${uid}`,
+            payment_method_id: 'pix',
+            payer: {
+                email: email || 'usuario@bingo.com'
+            },
+            // Guarda o ID do jogador dentro da transação para o Mercado Pago devolver depois
+            metadata: {
+                user_id: uid
             }
-        );
+        };
 
-        const payment = paymentResponse.data;
+        const response = await payment.create({ body });
+        
+        const copiaCola = response.point_of_interaction.transaction_data.qr_code;
+        console.log(`✅ Pix criado com sucesso para o jogador: ${uid}`);
 
-        console.log('Dados pagamento:', payment);
+        return res.json({ copiaCola });
 
-        /*
-        ========================================
-        VERIFICA SE FOI APROVADO
-        ========================================
-        */
-        if (payment.status === 'approved') {
-
-            const valorReal = Number(payment.transaction_amount || 0);
-
-            // UID do jogador
-            const uidJogador = (payment.external_reference || '').trim();
-
-            console.log(`Jogador: ${uidJogador}`);
-            console.log(`Valor: R$ ${valorReal}`);
-
-            if (!uidJogador) {
-                console.log('UID não encontrado');
-                return res.sendStatus(200);
-            }
-
-            /*
-            ========================================
-            FIREBASE
-            ========================================
-            */
-            try {
-
-                const urlUsuario = `${FIREBASE_DB_URL}/users/${uidJogador}.json`;
-
-                // busca usuário
-                const userRes = await axios.get(urlUsuario);
-                const userData = userRes.data;
-
-                const saldoAtual =
-                    userData && userData.creditos
-                        ? userData.creditos
-                        : 0;
-
-                const novoSaldo = Number(
-                    (saldoAtual + valorReal).toFixed(2)
-                );
-
-                // atualiza saldo
-                await axios.patch(urlUsuario, {
-                    creditos: novoSaldo
-                });
-
-                console.log(`✅ Saldo atualizado: R$ ${novoSaldo}`);
-
-                /*
-                ========================================
-                ACUMULADO
-                ========================================
-                */
-                try {
-
-                    const autoRes = await axios.get(
-                        `${FIREBASE_DB_URL}/jogo/automacao/acumulado.json`
-                    );
-
-                    const acumuladoAtual = autoRes.data ?? 0;
-
-                    const novoAcumulado = Number(
-                        (acumuladoAtual + valorReal).toFixed(2)
-                    );
-
-                    await axios.patch(
-                        `${FIREBASE_DB_URL}/jogo/automacao.json`,
-                        {
-                            acumulado: novoAcumulado
-                        }
-                    );
-
-                } catch (e) {
-                    console.log('Erro acumulado:', e.message);
-                }
-
-            } catch (error) {
-                console.error(
-                    'Erro Firebase:',
-                    error.message
-                );
-            }
-        }
-
-        return res.sendStatus(200);
-
-    } catch (err) {
-
-        console.error(
-            'Erro webhook:',
-            err.response?.data || err.message
-        );
-
-        return res.sendStatus(500);
+    } catch (error) {
+        console.error('❌ Erro ao criar cobrança no Mercado Pago:', error.message);
+        return res.status(500).json({ error: 'Erro ao gerar Pix' });
     }
 });
 
-/*
-========================================
-ANTI SONO
-========================================
-*/
-setInterval(() => {
+// 2. WEBHOOK DO MERCADO PAGO (AVISA QUANDO O PIX FOI PAGO)
+app.post('/webhook', async (req, res) => {
+    console.log('--- NOTIFICAÇÃO DE PAGAMENTO RECEBIDA ---');
+    
+    // O Mercado Pago avisa eventos de 'payment'
+    if (req.query.type === 'payment' || req.body.type === 'payment') {
+        const idPagamento = req.query['data.id'] || req.body.data.id;
+        console.log(`Verificando pagamento ID: ${idPagamento}`);
 
-    axios
-        .get('https://bingo-webhook-livepix.onrender.com/')
-        .then(() =>
-            console.log('Servidor acordado')
-        )
-        .catch((err) =>
-            console.log('Erro ping:', err.message)
-        );
+        try {
+            // Busca os detalhes reais do pagamento diretamente no Mercado Pago
+            const pagInfo = await payment.get({ id: idPagamento });
+            
+            if (pagInfo.status === 'approved') {
+                const valorReal = pagInfo.transaction_amount;
+                const uidJogador = pagInfo.metadata.user_id;
 
-}, 300000);
+                console.log(`💰 APROVADO! Jogador: [${uidJogador}] - Valor: R$ ${valorReal}`);
 
-/*
-========================================
-START
-========================================
-*/
-const PORT = process.env.PORT || 3000;
+                if (uidJogador) {
+                    const urlUsuario = `${FIREBASE_DB_URL}/users/${uidJogador}.json`;
+                    
+                    // Busca o saldo atual do jogador no Firebase
+                    const userRes = await axios.get(urlUsuario);
+                    const userData = userRes.data;
 
-app.listen(PORT, () => {
-    console.log(`Servidor rodando na porta ${PORT}`);
+                    const saldoAtual = userData && userData.creditos ? userData.creditos : 0;
+                    const novoSaldo = Number((saldoAtual + valorReal).toFixed(2));
+
+                    // Atualiza os créditos no banco de dados
+                    await axios.patch(urlUsuario, { creditos: novoSaldo });
+                    console.log(`✅ Saldo atualizado no Firebase para R$ ${novoSaldo}`);
+                }
+            }
+        } catch (error) {
+            console.error('❌ Erro ao processar o webhook:', error.message);
+        }
+    }
+
+    // Responde 200 OK para o Mercado Pago não ficar repetindo o aviso
+    return res.status(200).send('OK');
 });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
