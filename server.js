@@ -6,10 +6,15 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// CONFIGURAÇÃO SEGURO DO CLIENT DO MERCADO PAGO V2
-// Certifique-se de que a variável de ambiente MERCADO_PAGO_TOKEN está configurada no painel do Render
+// COLE O SEU TOKEN REAL DO MERCADO PAGO ENTRE AS ASPAS ABAIXO
+// Exemplo: 'APP_USR-xxxxxxxxx' ou 'TEST-xxxxxxxxx'
+const MEU_TOKEN_MERCADO_PAGO = 'SEU_TOKEN_AQUI'; 
+
+// O sistema tenta ler o Render, se não achar, usa o token fixo que você colou acima
+const tokenFinal = process.env.MERCADO_PAGO_TOKEN || MEU_TOKEN_MERCADO_PAGO;
+
 const client = new MercadoPagoConfig({ 
-    accessToken: process.env.MERCADO_PAGO_TOKEN || 'APP_USR-458222214312-TESTE-EXEMPLO' 
+    accessToken: tokenFinal 
 });
 const payment = new Payment(client);
 
@@ -17,56 +22,45 @@ app.get('/', (req, res) => {
     res.send('Servidor do Bingo Royale rodando perfeitamente!');
 });
 
-// ROTA ULTRA-BLINDADA PARA GERAÇÃO DO PIX
 app.post('/criar-pix', async (req, res) => {
-    console.log('--- NOVA TENTATIVA DE GERAÇÃO DE PIX ---');
+    console.log('--- SOLICITAÇÃO DE GERAÇÃO DE PIX ---');
     const { uid, valor, email } = req.body;
 
     if (!uid || !valor) {
-        console.error('❌ Falha: uid ou valor ausentes na requisição.');
-        return res.status(400).json({ error: 'Dados insuficientes enviados pelo front-end.' });
+        return res.status(400).json({ error: 'Dados insuficientes.' });
     }
 
     try {
-        const dadosPagamento = {
+        const response = await payment.create({
             body: {
                 transaction_amount: Number(valor),
-                description: `Recarga Bingo - Jogador ${uid}`,
+                description: `Recarga Bingo - ID ${uid}`,
                 payment_method_id: 'pix',
                 payer: {
-                    email: email || 'usuario.bingo@gmail.com'
+                    email: email || 'usuario@bingo.com'
                 },
                 metadata: {
                     user_id: uid
                 }
             }
-        };
-
-        console.log(`Enviando dados ao Mercado Pago para o valor de R$ ${valor}...`);
-        const response = await payment.create(dadosPagamento);
+        });
         
-        // Coleta os dados independente do nível de aninhamento retornado pelo SDK
         const copiaCola = response.point_of_interaction?.transaction_data?.qr_code;
         const qrCodeBase64 = response.point_of_interaction?.transaction_data?.qr_code_base64;
         
         if (!copiaCola) {
-            console.error('❌ Resposta inválida do Mercado Pago (Chave Copia e Cola ausente):', JSON.stringify(response));
-            return res.status(500).json({ error: 'O Mercado Pago respondeu, mas não gerou o código Pix.' });
+            return res.status(500).json({ error: 'O Mercado Pago nao gerou o texto do Pix.' });
         }
 
-        console.log(`✅ Pix gerado com sucesso para o ID: ${uid}`);
+        console.log(`✅ Pix gerado com sucesso: ${uid}`);
         return res.json({ 
             copiaCola: copiaCola,
             qrCodeBase64: qrCodeBase64
         });
 
     } catch (error) {
-        // ESSA SEÇÃO FOI ATUALIZADA PARA ENVIAR O ERRO REAL PARA A UI DO JOGO
-        console.error('❌ ERRO DETALHADO NO MERCADO PAGO:', error);
-        
-        // Extrai a mensagem de erro interna do Mercado Pago, se houver
-        const mensagemErroInterno = error.message || (error.cause && error.cause[0]?.description) || 'Erro interno na API do MP';
-        
+        console.error('❌ Erro no Mercado Pago:', error);
+        const mensagemErroInterno = error.message || (error.cause && error.cause[0]?.description) || 'Erro na API';
         return res.status(500).json({ 
             error: 'Erro ao gerar Pix', 
             detalhes: mensagemErroInterno 
@@ -76,5 +70,5 @@ app.post('/criar-pix', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Servidor integrado rodando com sucesso na porta ${PORT}`);
+    console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
